@@ -9,4 +9,5 @@ urlpatterns = [
     path("api/history", views.api_history, name="api_history"),
     path("video_feed", views.video_feed, name="video_feed"),
     path("set_mode", views.set_mode, name="set_mode"),
+    path("clear_logs", views.clear_logs, name="clear_logs"),
 ]

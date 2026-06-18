@@ -12,6 +12,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32, Float32, String
+from std_srvs.srv import Trigger
 
 SHARED_DIR = os.environ.get("SHARED_DIR", "/shared")
 DB_PATH = os.path.join(SHARED_DIR, "detections.db")
@@ -38,7 +39,25 @@ class LoggerNode(Node):
 
         # Periodic writer so we always log even if a topic is quiet
         self.create_timer(LOG_INTERVAL, self._log_row)
+
+        # ROS2 service to clear the detection log (called by the dashboard button)
+        self.create_service(Trigger, "/logger/clear_log", self._on_clear_log)
+
         self.get_logger().info(f"logger_node started, writing {DB_PATH}")
+
+    def _on_clear_log(self, request, response):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            conn.execute("DELETE FROM detections")
+            conn.commit()
+            conn.close()
+            self.get_logger().info("detections.db cleared via /logger/clear_log")
+            response.success = True
+            response.message = "detection log cleared"
+        except Exception as e:  # noqa: BLE001
+            response.success = False
+            response.message = str(e)
+        return response
 
     def _init_db(self):
         conn = sqlite3.connect(DB_PATH, timeout=5.0)

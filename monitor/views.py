@@ -167,3 +167,27 @@ def set_mode(request):
             status=500,
         )
     return JsonResponse({"ok": True, "mode": mode, "via": via})
+
+
+@csrf_exempt
+@require_POST
+def clear_logs(request):
+    """Clear the detection log via logger_node's ROS2 service (std_srvs/Trigger)."""
+    container = settings.ROS2_CONTAINER
+    inner = (
+        "source /opt/ros/jazzy/setup.bash && "
+        "ros2 service call /logger/clear_log std_srvs/srv/Trigger '{}'"
+    )
+    cmd = ["docker", "exec", container, "bash", "-lc", inner]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return JsonResponse({"ok": False, "error": "docker exec timed out"}, status=504)
+    except FileNotFoundError:
+        return JsonResponse({"ok": False, "error": "docker not found on host"}, status=500)
+
+    ok = proc.returncode == 0 and "response:" in (proc.stdout or "")
+    return JsonResponse(
+        {"ok": ok, "error": None if ok else (proc.stderr.strip() or "clear failed")},
+        status=200 if ok else 500,
+    )
