@@ -1,9 +1,24 @@
 # Vision Monitoring System (비전 모니터링 시스템)
 
-임베디드 리눅스 기말 프로젝트. **ROS2(Jazzy) 컨테이너**가 컴퓨터 비전 처리를 담당하고,
+**ROS2(Jazzy) 컨테이너**가 컴퓨터 비전 처리를 담당하고,
 **WSL2 호스트의 Django 웹 대시보드**가 결과를 실시간으로 보여주며 브라우저에서 처리 모드를 전환한다.
 GPU(NVIDIA RTX 3080)로 **영상 디코딩(NVDEC)** 과 **비전 연산(CUDA OpenCV)** 을 모두 가속하고,
 **대시보드가 보는 데이터는 ROS2 토픽을 통과**해서 흐른다.
+
+---
+
+## 0. 프로젝트 목적 (왜 만들었나)
+
+이 프로젝트는 **실시간 영상 분석 파이프라인을 ROS2 기반으로 설계하고, GPU 가속과 웹 모니터링까지 하나로 통합**하는 것을 목표로 만들었다. 단순히 OpenCV로 영상을 처리하는 데서 그치지 않고, 실제 임베디드/로보틱스 시스템에서 쓰이는 구조(노드 분리, 토픽·서비스·파라미터 통신, 컨테이너 배포)를 직접 구현하고 검증하는 데 초점을 뒀다.
+
+동기와 학습 목표:
+
+- **ROS2 아키텍처 체득** — 처리(`vision_node`)·기록(`logger_node`)·웹 연동(`web_bridge_node`)의 책임을 노드로 분리하고, 토픽 / 커스텀 서비스(`SetMode`) / 파라미터로 통신하는 모듈식 구조를 설계한다.
+- **GPU 가속의 실효성 확인** — 영상 디코딩(NVDEC)과 비전 연산(CUDA OpenCV)을 GPU로 옮겨, CPU 대비 처리량이 어떻게 달라지는지(약 15fps → 60fps급) 직접 측정한다.
+- **시각화의 현대화** — 무거운 rviz / 데스크톱 GUI 대신 어디서든 접속 가능한 **웹 대시보드**로 상태를 보고 모드를 전환한다. 처리(백엔드)와 표시(프론트엔드)를 분리하는 실전 패턴.
+- **컨테이너 기반 재현성** — Docker로 ROS2 + CUDA 환경을 고정해, 복잡한 의존성(ROS2 / CUDA / OpenCV) 설치 없이도 동일하게 실행되도록 한다.
+
+요약하면, "**GPU로 가속된 비전 처리 + ROS2 노드 통신 + 웹 모니터링**"이라는 감시·모니터링 시스템의 축소판을 직접 구축해 보는 프로젝트다.
 
 ---
 
@@ -129,15 +144,15 @@ ros2 param set /vision_node mode motion
 
 ---
 
-## 4. CPU 버전 vs GPU 버전
+## 4. GPU 버전 구성
 
-| 항목 | CPU 버전 | GPU 버전 (강의와 동일) |
-|------|----------|----------------------|
-| 파일 | `Dockerfile`, `docker-compose.yml` | `Dockerfile.cuda`, `docker-compose.cuda.yml` |
-| 베이스 이미지 | `ros:jazzy-ros-base` | `ros:jazzy-ros-base` + CUDA Toolkit 12.6 |
-| OpenCV | apt `python3-opencv` (CPU) | **소스 빌드 4.10 + CUDA (sm_86)** |
-| 영상 디코딩 | CPU (OpenCV/ffmpeg) | **GPU NVDEC (PyNvVideoCodec)** |
-| 비전 연산 | CPU | **GPU (cv2.cuda MOG2/Canny/cvtColor)** |
+| 항목 | 내용 |
+|------|------|
+| 파일 | `Dockerfile.cuda`, `docker-compose.cuda.yml` |
+| 베이스 이미지 | `ros:jazzy-ros-base` + CUDA Toolkit 12.6 |
+| OpenCV | 소스 빌드 4.10 + CUDA (sm_86) |
+| 영상 디코딩 | GPU NVDEC (PyNvVideoCodec) |
+| 비전 연산 | GPU (cv2.cuda MOG2 / Canny / cvtColor) |
 
 `vision_node.py` 는 **자동 감지 + 폴백**: CUDA 장치가 보이면 GPU, 없으면 CPU. NVDEC 실패 시 CPU 디코딩으로 폴백.
 현재 장치는 `state.json` 의 `device`/`decode`, 프레임 오버레이 `[CUDA|dec:nvdec]`, 대시보드 배지로 표시.
@@ -152,7 +167,7 @@ ros2 param set /vision_node mode motion
 - (GPU 디코딩) WSL 드라이버 라이브러리 `libnvcuvid.so.1`, `libnvidia-encode.so.1`
   (호스트 `/usr/lib/wsl/lib/` 에 존재 → compose 가 컨테이너로 bind-mount)
 
-### GPU 버전 (권장 / 강의와 동일)
+### GPU 버전 (권장)
 ```bash
 cd ~/vision_monitor
 
