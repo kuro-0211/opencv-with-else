@@ -1,0 +1,6 @@
+shared/
+.venv/
+db.sqlite3
+__pycache__/
+*.pyc
+test_video.mp4

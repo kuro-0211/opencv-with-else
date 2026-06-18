@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+db.sqlite3
+shared/latest_frame.jpg
+shared/state.json
+shared/detections.db
+shared/detections.db-wal
+shared/detections.db-shm
+shared/*.tmp

@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vision Monitoring System</title>
+<style>
+  :root { --bg:#0f1115; --panel:#1a1d24; --accent:#36d399; --muted:#8b93a7; --warn:#f87272; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+         background:var(--bg); color:#e6e8ee; }
+  header { padding:14px 22px; background:#11141a; border-bottom:1px solid #232733;
+           display:flex; align-items:center; gap:14px; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  .dot { width:11px; height:11px; border-radius:50%; background:var(--warn); }
+  .dot.on { background:var(--accent); box-shadow:0 0 8px var(--accent); }
+  .wrap { display:grid; grid-template-columns: minmax(320px, 800px) 1fr; gap:18px; padding:18px 22px; }
+  .panel { background:var(--panel); border:1px solid #232733; border-radius:12px; padding:16px; }
+  .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em;
+              color:var(--muted); margin:0 0 12px; }
+  /* cap the displayed feed size (video resolution is unchanged) */
+  #feed { width:100%; max-width:768px; margin:0 auto; border-radius:8px; display:block; background:#000; aspect-ratio:4/3; object-fit:contain; }
+  .metrics { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+  .metric { background:#11141a; border-radius:10px; padding:12px 14px; }
+  .metric .v { font-size:26px; font-weight:700; }
+  .metric .l { font-size:12px; color:var(--muted); margin-top:2px; }
+  .modes { display:flex; gap:10px; margin-top:6px; }
+  .modes button { flex:1; padding:10px; border-radius:9px; border:1px solid #2c3140;
+                  background:#11141a; color:#e6e8ee; cursor:pointer; font-size:14px;
+                  transition:.15s; }
+  .modes button:hover { border-color:var(--accent); }
+  .modes button.active { background:var(--accent); color:#06281c; border-color:var(--accent); font-weight:700; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #232733; }
+  th { color:var(--muted); font-weight:600; }
+  td.c { font-variant-numeric: tabular-nums; }
+  canvas { width:100%; height:90px; display:block; }
+  .full { grid-column:1 / -1; }
+  small.note { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <span id="dot" class="dot"></span>
+  <h1>Vision Monitoring System</h1>
+  <span id="devBadge" style="font-size:12px;font-weight:700;padding:3px 9px;border-radius:6px;background:#2c3140;color:#8b93a7;">– </span>
+  <small class="note" id="statusText">connecting…</small>
+</header>
+
+<div class="wrap">
+  <section class="panel">
+    <h2>Live Feed</h2>
+    <img id="feed" alt="live feed">
+  </section>
+
+  <section class="panel">
+    <h2>Metrics</h2>
+    <div class="metrics">
+      <div class="metric"><div class="v" id="m_count">–</div><div class="l">Objects</div></div>
+      <div class="metric"><div class="v" id="m_fps">–</div><div class="l">FPS</div></div>
+      <div class="metric"><div class="v" id="m_proc">–</div><div class="l">Proc time (ms)</div></div>
+      <div class="metric"><div class="v" id="m_mode">–</div><div class="l">Mode</div></div>
+    </div>
+    <h2 style="margin-top:18px">Mode Control</h2>
+    <div class="modes">
+      <button data-mode="motion">Motion</button>
+      <button data-mode="edge">Edge</button>
+      <button data-mode="raw">Raw</button>
+    </div>
+    <p><small class="note" id="modeMsg">&nbsp;</small></p>
+  </section>
+
+  <section class="panel full">
+    <h2>Object Count History</h2>
+    <canvas id="chart" width="1000" height="90"></canvas>
+  </section>
+
+  <section class="panel full">
+    <h2>Detection Log</h2>
+    <table>
+      <thead><tr><th>#</th><th>Time</th><th>Mode</th><th>Objects</th><th>FPS</th><th>Proc ms</th></tr></thead>
+      <tbody id="logBody"></tbody>
+    </table>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// --- live feed + metrics, driven by ONE loop so they stay in sync ---
+// vision_node writes latest_frame.jpg and state.json together (atomically) at
+// WRITE_FPS. We fetch state, then refresh the frame with the SAME timestamp on
+// each tick, so the numbers shown match the frame on screen as closely as
+// possible. The 4 are updated together; no separate slower metrics poll.
+const SYNC_MS = 100;
+
+function applyState(s) {
+  const online = s.online && (Date.now()/1000 - (s.timestamp||0) < 5);
+  $("dot").classList.toggle("on", online);
+  $("statusText").textContent = online
+    ? "ROS2 vision node online" : "waiting for vision node…";
+  const dev = (s.device || "").toUpperCase();
+  const decode = (s.decode || "").toUpperCase();
+  const badge = $("devBadge");
+  let label = dev ? (dev === "CUDA" ? "GPU·CUDA" : dev) : "–";
+  if (decode) label += "  ·  decode:" + decode;
+  badge.textContent = label;
+  badge.style.background = dev === "CUDA" ? "#0e3b2a" : "#3a2c0e";
+  badge.style.color = dev === "CUDA" ? "#36d399" : "#f5c451";
+  $("m_count").textContent = s.object_count ?? "–";
+  $("m_fps").textContent = s.fps != null ? Number(s.fps).toFixed(1) : "–";
+  $("m_proc").textContent = s.proc_time_ms != null ? Number(s.proc_time_ms).toFixed(1) : "–";
+  $("m_mode").textContent = s.mode ?? "–";
+  document.querySelectorAll(".modes button").forEach(b =>
+    b.classList.toggle("active", b.dataset.mode === s.mode));
+}
+
+async function syncTick() {
+  const t = Date.now();
+  try {
+    const r = await fetch("/api/state?t=" + t);
+    const s = await r.json();
+    applyState(s);
+  } catch (e) { /* ignore transient errors */ }
+  // refresh the frame with the same cache-buster -> reflects the same write
+  $("feed").src = "/video_feed?t=" + t;
+}
+setInterval(syncTick, SYNC_MS);
+syncTick();
+
+// --- logs ---
+async function pollLogs() {
+  try {
+    const r = await fetch("/api/logs?limit=20");
+    const { logs } = await r.json();
+    $("logBody").innerHTML = logs.map(l => `
+      <tr>
+        <td>${l.id}</td>
+        <td>${new Date(l.ts*1000).toLocaleTimeString()}</td>
+        <td>${l.mode}</td>
+        <td class="c">${l.object_count}</td>
+        <td class="c">${Number(l.fps).toFixed(1)}</td>
+        <td class="c">${Number(l.proc_time_ms).toFixed(1)}</td>
+      </tr>`).join("");
+  } catch (e) {}
+}
+setInterval(pollLogs, 1500);
+pollLogs();
+
+// --- history chart (tiny canvas sparkline, no libs) ---
+async function pollChart() {
+  try {
+    const r = await fetch("/api/history?limit=80");
+    const { object_count } = await r.json();
+    drawChart(object_count || []);
+  } catch (e) {}
+}
+function drawChart(data) {
+  const c = $("chart"), ctx = c.getContext("2d");
+  const W = c.width, H = c.height;
+  ctx.clearRect(0,0,W,H);
+  if (!data.length) return;
+  const max = Math.max(2, ...data);
+  const bw = W / data.length;
+  ctx.fillStyle = "#36d399";
+  data.forEach((v,i) => {
+    const h = (v/max) * (H-10);
+    ctx.fillRect(i*bw, H-h, Math.max(1,bw-1), h);
+  });
+}
+setInterval(pollChart, 1500);
+pollChart();
+
+// --- mode buttons ---
+document.querySelectorAll(".modes button").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const mode = btn.dataset.mode;
+    $("modeMsg").textContent = "switching to " + mode + "…";
+    try {
+      const body = new URLSearchParams({ mode });
+      const r = await fetch("/set_mode", { method:"POST", body });
+      const j = await r.json();
+      $("modeMsg").textContent = j.ok ? ("mode → " + j.mode) : ("error: " + j.error);
+    } catch (e) {
+      $("modeMsg").textContent = "request failed";
+    }
+  });
+});
+</script>
+</body>
+</html>

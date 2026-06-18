@@ -1,0 +1,86 @@
+# CUDA-accelerated build: ROS2 Jazzy + OpenCV 4.10 compiled WITH CUDA.
+#
+# Strategy: start from the known-good ROS2 Jazzy base (Ubuntu 24.04) and add the
+# CUDA toolkit on top, then build OpenCV + opencv_contrib from source with CUDA
+# enabled for the host GPU only (RTX 3080 = sm_86) to keep the build short.
+FROM ros:jazzy-ros-base
+
+ARG OPENCV_VERSION=4.10.0
+ARG CUDA_ARCH=8.6
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ---- 1. CUDA toolkit 12.6 (provides nvcc) -----------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates gnupg \
+    && wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb \
+    && apt-get update && apt-get install -y --no-install-recommends cuda-toolkit-12-6 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CUDA_HOME=/usr/local/cuda-12.6
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+# ---- 2. OpenCV build dependencies -------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git pkg-config unzip \
+        g++-13 \
+        python3-dev python3-numpy \
+        libjpeg-dev libpng-dev libtiff-dev \
+        libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+        libgtk-3-dev libtbb-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- 3. Build OpenCV with CUDA ----------------------------------------------
+WORKDIR /opt
+RUN wget -q -O opencv.zip https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.zip \
+    && wget -q -O contrib.zip https://github.com/opencv/opencv_contrib/archive/refs/tags/${OPENCV_VERSION}.zip \
+    && unzip -q opencv.zip && unzip -q contrib.zip && rm opencv.zip contrib.zip
+
+RUN cmake -S /opt/opencv-${OPENCV_VERSION} -B /opt/build \
+        -D CMAKE_BUILD_TYPE=Release \
+        -D CMAKE_INSTALL_PREFIX=/usr/local \
+        -D OPENCV_EXTRA_MODULES_PATH=/opt/opencv_contrib-${OPENCV_VERSION}/modules \
+        -D WITH_CUDA=ON \
+        -D CUDA_ARCH_BIN=${CUDA_ARCH} \
+        -D CUDA_ARCH_PTX=${CUDA_ARCH} \
+        -D CUDA_HOST_COMPILER=/usr/bin/g++-13 \
+        -D ENABLE_FAST_MATH=ON \
+        -D CUDA_FAST_MATH=ON \
+        -D WITH_CUBLAS=ON \
+        -D WITH_CUDNN=OFF \
+        -D OPENCV_DNN_CUDA=OFF \
+        -D WITH_FFMPEG=ON \
+        -D BUILD_opencv_python3=ON \
+        -D PYTHON3_EXECUTABLE=/usr/bin/python3 \
+        -D OPENCV_PYTHON3_INSTALL_PATH=lib/python3.12/dist-packages \
+        -D BUILD_LIST=cudev,core,imgproc,imgcodecs,videoio,video,python3,cudaarithm,cudaimgproc,cudafilters,cudabgsegm,cudawarping \
+        -D BUILD_EXAMPLES=OFF -D BUILD_TESTS=OFF -D BUILD_PERF_TESTS=OFF -D BUILD_DOCS=OFF \
+        -D OPENCV_GENERATE_PKGCONFIG=ON \
+    && cmake --build /opt/build -j"$(nproc)" \
+    && cmake --install /opt/build \
+    && ldconfig \
+    && rm -rf /opt/build /opt/opencv-${OPENCV_VERSION} /opt/opencv_contrib-${OPENCV_VERSION}
+
+# ---- 4. GPU video decoding (NVDEC via NVIDIA's PyNvVideoCodec) ---------------
+# Avoids rebuilding OpenCV with the cudacodec module (which needs the non-free
+# Video Codec SDK headers). libnvcuvid/libnvidia-encode are provided at runtime
+# by the host driver (bind-mounted in docker-compose.cuda.yml).
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip \
+    && pip install --break-system-packages --no-cache-dir PyNvVideoCodec \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- 5. Custom ROS2 service interface (vision_interfaces/srv/SetMode) --------
+COPY ros2_ws/src /ros2_ws/src
+RUN bash -lc "source /opt/ros/jazzy/setup.bash && cd /ros2_ws && colcon build --packages-select vision_interfaces"
+
+# ---- 6. App -----------------------------------------------------------------
+COPY ros2_nodes/ /ros2_nodes/
+
+ENV VIDEO_PATH=/test_video.mp4 \
+    SHARED_DIR=/shared \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/usr/local/lib/python3.12/dist-packages
+
+# ldconfig registers bind-mounted driver libs; source ROS + the custom-interface
+# overlay so vision_interfaces (SetMode service) is importable.
+CMD ["bash", "-lc", "ldconfig && source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash && exec python3 /ros2_nodes/run_nodes.py"]

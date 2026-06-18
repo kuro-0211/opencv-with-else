@@ -1,0 +1,15 @@
+services:
+  ros2_vision:
+    build: .
+    image: ros2_vision:latest
+    container_name: ros2_vision
+    restart: unless-stopped
+    volumes:
+      - ./shared:/shared
+      - ./test_video.mp4:/test_video.mp4:ro
+    # ROS2 DDS uses shared memory / multicast; host networking keeps it simple
+    # and lets `docker exec ... ros2 topic pub` reach the running nodes.
+    network_mode: host
+    environment:
+      - VIDEO_PATH=/test_video.mp4
+      - SHARED_DIR=/shared
